@@ -1,10 +1,12 @@
-// M5 + DMX[DONE]
+// M5 + DMX
 #include <M5Unified.h>  
 #include <SPI.h>   
 #include <esp_dmx.h> 
 
-//#include "M5_Ethernet.h" 
-//#include <ModbusTCP.h>  
+#include <M5Module_LAN.h> // M5 IP ADDRESS
+
+#include <ModbusTCP.h>  // ORIENTAL MOTOR
+#include "motor_registers.h"
 
 // =============== DMX CONFIG ===============
 #define DMX_TX_PIN GPIO_NUM_7
@@ -16,14 +18,46 @@ uint8_t data[DMX_PACKET_SIZE];   // DMX data buffer (513 bytes)
 // =============== DMX CONFIG ===============
 
 
+
+// =============== M5 IP CONFIG ===============
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+
+IPAddress m5_ip(192, 168, 100, 30); 
+IPAddress subnet(255, 255, 255, 0);
+IPAddress gateway(192, 168, 100, 1);   // My PC/router
+IPAddress dns(192, 168, 100, 1);       // Usually same
+
+M5Module_LAN LAN;
+ModbusTCP mb;
+bool motorConnected = false;
+// =============== M5 IP CONFIG ===============
+
+
+
+void setupDMX();
+void updateDMX();
+void setupLAN();
+
+
+void setupModbus();
+void readMotorPosition();
+void moveMotor(int32_t position);
+
+
+
 void setup() {
-  M5.begin();
+  auto cfg = M5.config();
+  cfg.serial_baudrate = 115200;
+  M5.begin(cfg);
   M5.Display.setTextSize(2);
   
-  Serial.begin(115200);
-  delay(1000);
-  
-  // =============== DMX CONFIG ===============
+  setupDMX();
+  setupLAN();
+  //setupModbus();
+
+}
+
+void setupDMX(){
   dmx_config_t config = DMX_CONFIG_DEFAULT;   // 1. Configure DMX with default settings
   dmx_driver_install(dmxPort, &config, NULL, 0);   // 3. Install driver
   dmx_set_pin(dmxPort, DMX_TX_PIN, DMX_RX_PIN, DMX_EN_PIN);   // 2. Set GPIO pins (TX, RX, EN)
@@ -33,28 +67,23 @@ void setup() {
   M5.Display.fillScreen(BLACK);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(GREEN);
-  M5.Display.setCursor(10, 10);
-  M5.Display.println("DMX FADING...");
-  M5.Display.setCursor(10, 40);
+  M5.Display.setCursor(0, 10);
+  M5.Display.println("DMX ING...");
+  M5.Display.setCursor(0, 40);
   M5.Display.printf("Bright:", data[1]);
-  M5.Display.setCursor(10, 70);
+  M5.Display.setCursor(0, 70);
   M5.Display.printf("Color:", data[2]);
-  // =============== DMX CONFIG ===============
 
-  
-}
+  }
 
-void loop() {
-  M5.update();
-
-  // =============== DMX CONFIG ===============
+void updateDMX() {
   static uint8_t brightness = 0; //range: 0-255
   static uint8_t color = 0; //2700k(yellow)-6500k(white)
 
   static int8_t brightness_dir = 1;  // 1 = getting brighter, -1 = getting dimmer
-  static int8_t color_dir = -1; // 1 = getting whiter, -1 = getting warmer
+  static int8_t color_dir = 1; // 1 = getting whiter, -1 = getting warmer
 
-  static int8_t brightness_speed = 2;  // loop speed
+  static int8_t brightness_speed = 1;  // loop speed
   static int8_t color_speed = 1; // loop speed
 
   brightness += brightness_dir * brightness_speed; 
@@ -66,9 +95,8 @@ void loop() {
   if (color >= 255) color_dir = -1;   // Reverse direction at limits
   if (color <= 0) color_dir = 1;
 
-  data[1] = brightness;  // Channel 1 
-  data[2] = color;  // Channel 2 
-
+  data[1] = brightness;
+  data[2] = color;
   dmx_write(dmxPort, data, DMX_PACKET_SIZE); // write
   dmx_send(dmxPort); // send
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
@@ -86,8 +114,74 @@ void loop() {
     M5.Display.fillRect(100, 70, 60, 16, BLACK);
     M5.Display.setCursor(100, 70);
     M5.Display.print(data[2]);
+}
+}
+
+void setupLAN() {
+  SPI.begin(SCK, MISO, MOSI, -1);
+  M5.Ex_I2C.release();
+  LAN.setResetPin(GPIO_NUM_13);
+  LAN.reset();
+  LAN.init(1);  // CS pin = 1 for CoreS3
+  LAN.begin(mac, m5_ip, dns, gateway, subnet);  // Forstatic IP
+  delay(2000);
+
+  M5.Display.println();
+  M5.Display.println();
+  M5.Display.print("IP = ");
+  M5.Display.println(LAN.localIP());
+}
+
+
+
+
+void setupModbus() {
+  Serial.println("Connecting to Oriental Motor...");
+  // IPAddress oriental_motor_ip = MOTOR_IP_ADDRESS;
+  IPAddress oriental_motor_ip (192, 168, 100, 10);
+  // uint32_t startTime = millis();
+  // const uint32_t TIMEOUT = 5000; 
+  mb.server(); 
+  mb.client();  // ModbusTCPクライアントとして設定
+  
+  // Oriental motorに接続
+  M5.Display.setCursor(10, 150);
+  M5.Display.print("Motor: ");  
+
+  if (mb.connect(oriental_motor_ip)) {
+    motorConnected = true;
+    M5.Display.setTextColor(GREEN);
+    M5.Display.println("Connected");
+    Serial.println("Motor connected!");
+
+  } else {
+    motorConnected = false;
+    M5.Display.setTextColor(RED);
+    M5.Display.println("Failed");
+    Serial.println("Motor connection failed");
   }
 
-  delay(30);  // 30ms = ~33 updates/sec for DMX
+
   
+
+
+
+
 }
+
+void readMotorPosition() {
+  // mb.readHoldingRegisters(REG_CURRENT_POSITION, ...);
+}
+
+void moveMotor(int32_t position) {
+  // mb.writeRegister(REG_POSITION_COMMAND, position);
+}
+
+void loop() {
+  M5.update();
+  updateDMX();
+
+
+delay(30);
+}
+
