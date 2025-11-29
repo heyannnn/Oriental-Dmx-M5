@@ -1,0 +1,299 @@
+// M5 + DMX 設定完了！！
+#include <M5Unified.h>  
+#include <SPI.h>   
+#include <esp_dmx.h> 
+
+// M5 IP ADDRESS 設定完了！！
+#include <M5Module_LAN.h>
+
+// ORIENTAL MOTOR
+#include <ModbusTCP.h>  
+
+// =============== DMX CONFIG 設定完了！！===============
+#define DMX_TX_PIN GPIO_NUM_7
+#define DMX_RX_PIN GPIO_NUM_10
+#define DMX_EN_PIN GPIO_NUM_6
+
+dmx_port_t dmxPort = DMX_NUM_1;  // Use UART1
+uint8_t data[DMX_PACKET_SIZE];   // DMX data buffer (513 bytes)
+// =============== DMX CONFIG 設定 完了！！===============
+
+
+
+
+// =============== M5 IP CONFIG 設定完了！！===============
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+
+// Your M5's static IP 
+IPAddress m5_ip(192, 168, 100, 30); 
+IPAddress subnet(255, 255, 255, 0);
+IPAddress gateway(192, 168, 100, 1);   // My PC/router
+IPAddress dns(192, 168, 100, 1);       // Usually same
+// =============== M5 IP CONFIG 設定完了！！===============
+
+
+
+
+
+// =============== ORIENTAL MOTOR CONFIG ===============
+void readCurrentPosition();
+bool isMotorReady();
+
+IPAddress oriental_motor_ip(192, 168, 100, 10);  // Oriental motor IP
+ModbusTCP mb;  // ModbusTCP instance
+bool motorConnected = false;
+
+// Oriental Motor AZシリーズ レジスタアドレス (az_define.pyより)
+#define ADDR_ALARM_MON      0x011F  // アラームモニタ
+#define ADDR_STATIC_IO_IN   0x0106  // 静的入力
+#define ADDR_STATIC_IO_OUT  0x011E  // 静的出力
+#define ADDR_POS            0x0120  // 現在位置
+#define ADDR_VEL            0x0122  // 現在速度
+#define ADDR_TARGET_POS     0x0124  // 目標位置
+#define ADDR_TRIG_MODE      0x0106  // トリガーモード
+
+// パラメータ読み書き用レジスタ
+#define ADDR_READ_PARAM_ID_R    0x012B
+#define ADDR_READ_WRITE_STATUS  0x012C
+#define ADDR_WRITE_PARAM_ID_R   0x012D
+#define ADDR_READ_DATA_LOW      0x012E
+#define ADDR_READ_DATA_HIGH     0x012F
+#define ADDR_READ_PARAM_ID      0x0113
+#define ADDR_WRITE_REQ          0x0114
+#define ADDR_WRITE_PARAM_ID     0x0115
+
+// ソフトリミット
+#define ADDR_SOFT_LIMIT_MIN     0x01C5
+#define ADDR_SOFT_LIMIT_MAX     0x01C4
+
+
+// 運転モード (OpMode)
+enum OpMode {
+  ABS_POS = 1,            // 絶対位置決め
+  REL_POS_CMD = 2,        // 相対位置決め（指令基準）
+  REL_POS_DET = 3,        // 相対位置決め（検出基準）
+  CONT_SPEED_CTRL = 16,   // 連続速度制御
+  CONT_PUSH = 17,         // 連続押し当て
+  CONT_TORQUE = 18        // 連続トルク
+};
+
+// 静的IO出力ビット割り当て (StaticIOOutBitAssign)
+enum StaticIOOutBit {
+  READY = 5,      // 運転準備完了
+  MOVE = 1,       // モーター動作中
+  IN_POS = 2,     // 位置決め完了
+  DCMD_RDY = 6,   // ダイレクトデータ運転準備完了
+  ALM_A = 7       // アラーム状態
+};
+
+// 静的IO入力ビット割り当て (StaticIOInBitAssign)
+enum StaticIOInBit {
+  START = 3,      // ストアードデータ運転実行
+  STOP = 5,       // モーター停止
+  FREE = 6,       // 無励磁
+  ALM_RST = 7,    // アラームリセット
+  TRIG = 8        // ダイレクトデータ運転実行
+};
+
+// メンテナンスコマンド
+#define ALARM_RESET         0x00C0  // アラームリセット
+#define P_PRESET_EXECUTE    0x00C5  // P-PRESET実行
+
+// =============== ORIENTAL MOTOR CONFIG ===============
+
+
+// グローバル変数
+int32_t currentPosition = 0;      // 現在位置
+int32_t lastMotorPosition = 0;    // 最後の位置（再開用）
+bool motorRunning = false;        // モーター動作状態
+int32_t motorSpeed = 1000;        // 速度設定（デフォルト低速）
+float startAcc = 10.0;          // 開始加速度
+float stopAcc = 10.0;           // 停止加速度
+
+// 制限値
+const int32_t VEL_LIMIT = 10000;  // 速度制限
+const float ACC_LIMIT = 100.0;    // 加速度制限
+const int32_t POS_LIMIT_MIN = -2147483647;  // 位置最小値
+const int32_t POS_LIMIT_MAX = 2147483647;   // 位置最大値
+
+// =============== ORIENTAL MOTOR CONFIG ===============
+
+void setup() {
+
+  M5.begin();
+  M5.Display.setTextSize(2);
+  
+  Serial.begin(115200);
+  delay(1000);
+
+
+  // =============== DMX CONFIG　設定完了！！ ===============
+  dmx_config_t config = DMX_CONFIG_DEFAULT;   // 1. Configure DMX with default settings
+  dmx_driver_install(dmxPort, &config, NULL, 0);   // 3. Install driver
+  dmx_set_pin(dmxPort, DMX_TX_PIN, DMX_RX_PIN, DMX_EN_PIN);   // 2. Set GPIO pins (TX, RX, EN)
+  memset(data, 0, DMX_PACKET_SIZE);
+
+  delay(1000);
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(GREEN);
+  M5.Display.setCursor(0, 10);
+  M5.Display.println("DMX ING...");
+  M5.Display.setCursor(0, 40);
+  M5.Display.printf("Bright:", data[1]);
+  M5.Display.setCursor(0, 70);
+  M5.Display.printf("Color:", data[2]);
+  // =============== DMX CONFIG 設定完了！！===============
+
+  
+
+
+  // =============== LAN IP CONFIG 設定完了！！===============
+  M5Module_LAN LAN;
+  SPI.begin(SCK, MISO, MOSI, -1);
+  M5.Ex_I2C.release();
+  LAN.setResetPin(GPIO_NUM_13);
+  LAN.reset();
+  LAN.init(1);  // CS pin = 1 for CoreS3
+  LAN.begin(mac, m5_ip, dns, gateway, subnet);  // Forstatic IP
+  delay(2000);
+
+  M5.Display.println();
+  M5.Display.println();
+  M5.Display.print("IP = ");
+  M5.Display.println(LAN.localIP());
+    // =============== LAN IP CONFIG 設定完了！！===============
+
+
+
+
+
+
+
+
+  // =============== Modbusセットアップ ===============
+  Serial.println("Connecting to Oriental Motor...");
+
+  uint32_t startTime = millis();
+  const uint32_t TIMEOUT = 5000; 
+  mb.server(); 
+  mb.client();  // ModbusTCPクライアントとして設定
+  
+  // Oriental motorに接続
+  M5.Display.setCursor(10, 150);
+  M5.Display.print("Motor: ");  
+
+  if (mb.connect(oriental_motor_ip)) {
+    motorConnected = true;
+    M5.Display.setTextColor(GREEN);
+    M5.Display.println("Connected");
+    
+    // 起動時に現在位置を読み取る
+    readCurrentPosition();
+    lastMotorPosition = currentPosition;
+    Serial.printf("現在位置: %d\n", currentPosition);
+    
+    // モーターの準備状態を確認
+    if (isMotorReady()) {
+      Serial.println("モーター準備完了");
+    }
+  } else {
+    M5.Display.setTextColor(RED);
+    M5.Display.println("Failed");
+  }
+
+
+
+}
+
+// =============== ORIENTAL NOTER セットアップ ===============
+
+// 32ビット値を読み取る関数
+int32_t readInt32(uint16_t address) {
+  if (!motorConnected) return 0;
+  
+  uint16_t data[2];
+  if (mb.readHreg(oriental_motor_ip, address, data, 2)) {
+    // Oriental motorは下位ワード、上位ワードの順で格納
+    return (int32_t)((uint32_t)data[1] << 16 | data[0]);
+  }
+  return 0;
+}
+
+// 静的IO出力を読み取る
+uint16_t readStaticIOOut() {
+  uint16_t value = 0;
+  mb.readHreg(oriental_motor_ip, ADDR_STATIC_IO_OUT, &value, 1);
+  return value;
+}
+
+
+// 現在位置を読み取る
+void readCurrentPosition() {
+  currentPosition = readInt32(ADDR_POS);
+}
+
+// モーター準備状態を確認
+bool isMotorReady() {
+  uint16_t status = readStaticIOOut();
+  return (status & (1 << READY)) != 0;
+}
+
+
+// =============== ORIENTAL NOTER セットアップ ===============
+
+
+
+
+
+
+
+void loop() {
+  M5.update();
+
+  // =============== DMX CONFIG 設定完了！！　===============
+  static uint8_t brightness = 0; //range: 0-255
+  static uint8_t color = 0; //2700k(yellow)-6500k(white)
+
+  static int8_t brightness_dir = 1;  // 1 = getting brighter, -1 = getting dimmer
+  static int8_t color_dir = -1; // 1 = getting whiter, -1 = getting warmer
+
+  static int8_t brightness_speed = 2;  // loop speed
+  static int8_t color_speed = 1; // loop speed
+
+  brightness += brightness_dir * brightness_speed; 
+  color += color_dir * color_speed;
+
+  if (brightness >= 50) brightness_dir = -1;  // Reverse direction at limits
+  if (brightness <= 0) brightness_dir = 1;
+
+  if (color >= 255) color_dir = -1;   // Reverse direction at limits
+  if (color <= 0) color_dir = 1;
+
+  data[1] = brightness;  // Channel 1 
+  data[2] = color;  // Channel 2 
+
+  dmx_write(dmxPort, data, DMX_PACKET_SIZE); // write
+  dmx_send(dmxPort); // send
+  dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
+
+  static uint32_t lastUpdate = 0; // print the value
+  if (millis() - lastUpdate > 100) {
+    lastUpdate = millis();
+
+    // Clear and update brightness number
+    M5.Display.fillRect(100, 40, 60, 16, BLACK);
+    M5.Display.setCursor(100, 40);
+    M5.Display.print(data[1]);
+
+    // Clear and update color number
+    M5.Display.fillRect(100, 70, 60, 16, BLACK);
+    M5.Display.setCursor(100, 70);
+    M5.Display.print(data[2]);
+  }
+// =============== DMX CONFIG 設定完了！！　===============
+
+
+  delay(30);  // 30ms = ~33 updates/sec for DMX
+  
+}

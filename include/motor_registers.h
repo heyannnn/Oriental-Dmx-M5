@@ -14,7 +14,7 @@
 // ===== MOTOR NETWORK CONFIG =====
 #define MOTOR_IP_ADDRESS IPAddress(192, 168, 100, 10)   // Oriental Motor IP as string
 #define MOTOR_PORT 502              // Modbus TCP port
-#define MOTOR_SLAVE_ID 1           // Modbus slave ID
+#define MOTOR_SLAVE_ID 0          // Modbus slave ID
 
 // Oriental Motor AZシリーズ レジスタアドレス (az_define.pyより)
 // モニタ系 (Monitor)
