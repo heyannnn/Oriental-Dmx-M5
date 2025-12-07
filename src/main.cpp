@@ -1,25 +1,24 @@
-// M5 + DMX
-#include <M5Unified.h>  
-#include <SPI.h>   
-#include <esp_dmx.h> 
 
+#include <M5Unified.h>  // M5 
+#include <SPI.h>   // M5 
+#include <esp_dmx.h> // DMX
 #include <M5Module_LAN.h> // M5 IP ADDRESS
+#include "motor_registers.h" // Oriental Motor Registers
+#include <esp_task_wdt.h>  // watchdog for unrebooting
+#include <UNIT_8ENCODER.h>       // M5Stack 8-Encoder Unit library
 
-#include "motor_registers.h"
-#include <esp_task_wdt.h> 
-
-// =============== DMX CONFIG ===============
+// ===============   DMX CONFIG   ===============
 #define DMX_TX_PIN GPIO_NUM_7 /// GPIO_NUM_7
 #define DMX_RX_PIN GPIO_NUM_10 // GPIO_NUM_10
 #define DMX_EN_PIN GPIO_NUM_6 // GPIO_NUM_6
 
 dmx_port_t dmxPort = DMX_NUM_1;  // Use UART1
 uint8_t data[DMX_PACKET_SIZE];   // DMX data buffer (513 bytes)
-// =============== DMX CONFIG ===============
+// ===============   DMX CONFIG   ===============
 
 
 
-// =============== M5 IP CONFIG ===============
+// ===============  M5 IP CONFIG  ===============
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
 IPAddress m5_ip(192, 168, 100, 30); 
@@ -29,18 +28,43 @@ IPAddress dns(192, 168, 100, 1);       // Usually same
 
 M5Module_LAN LAN;
 EthernetClient modbusClient;
+// ===============  M5 IP CONFIG   ===============
+
+
+// ===============  ORIENTAL MOTOR ===============
 bool motorConnected = false;
 uint16_t transactionID = 0;
-// =============== M5 IP CONFIG ===============
+bool justReconnected = false; 
+
+int32_t oriental_motorSpeed = -500; //500-5000 (swap direction -500)
+float oriental_motorStartAcc = 0.2; //0.2-5
+float oriental_motorStopAcc = 0.2; //0.2-5
+// ===============  ORIENTAL MOTOR ===============
 
 
+
+// =============== ENCORDER DEFINE ===============
+UNIT_8ENCODER encoder;           // Create encoder object
+bool encoder_found = false;   
+// =============== ENCORDER DEFINE ===============
+
+
+
+// =============== FUNCTION DEFINE ===============
 void setupDMX();
 void updateDMX();
 void setupLAN();
 
 bool connectToMotor();
+bool checkMotorConnection();
 void readMotorPosition();
 void startContinuousSpeedControl(int32_t speed, float startAcc, float stopAcc);
+void performHoming();
+bool checkAlarmsStatus();
+void clearAlarms();
+// =============== FUNCTION DEFINE ===============
+
+
 
 
 
@@ -50,28 +74,45 @@ void setup() {
   cfg.serial_baudrate = 115200;
   M5.begin(cfg);
   M5.Display.setTextSize(1.5);
-  
+
   esp_task_wdt_delete(NULL);  // disable watchdog timer
+
+
+  // Initialize Encoder BEFORE LAN!
+  Serial.println("Initializing encoder...");
+  Wire.begin(2, 1);  // I2C for encoder
+
+  if(encoder.begin()) {  // ← Try to initialize
+    encoder_found = true;  // ← ASSIGNMENT is OK here!
+    M5.Display.setCursor(50, 10);
+    M5.Display.println("encoder_on");
+  } else {
+    encoder_found = false;
+    M5.Display.setCursor(50, 10);
+    M5.Display.println("encoder_off");
+  }
+  delay(500);
+
+
+
 
   setupDMX();
   setupLAN();
-  delay(2000);
+  delay(1000);
 
   connectToMotor();
 
   // ADD THIS: Start continuous rotation after connection
   if (motorConnected) {
     delay(1000);  // Wait 1 second after connection
-
+    if(checkAlarmsStatus()){
+      clearAlarms();
+      performHoming();
+    }
     Serial.println("\n🎪 INSTALLATION MODE");
     Serial.println("Starting continuous rotation...\n");
 
-    // Speed and acceleration settings (adjust these!)
-    int32_t speed = 1000;      // Rotation speed (try 500-2000)
-    float startAcc = 1.0;      // Very slow start (lower = slower)
-    float stopAcc = 1.0;       // Very slow stop (lower = slower)
-
-    startContinuousSpeedControl(speed, startAcc, stopAcc);
+    startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
   }
 }
 
@@ -177,6 +218,9 @@ void setupLAN() {
   M5.Display.println(LAN.localIP());
 }
 
+
+
+// MOTOR FUNCTIONS
 bool connectToMotor(){
   if (motorConnected) return true;
 
@@ -201,6 +245,25 @@ bool connectToMotor(){
   M5.Display.println("Motor: Failed!");
   M5.Display.setTextColor(WHITE);
   return false;
+
+}
+
+bool checkMotorConnection(){
+  if(motorConnected && modbusClient.connected()){
+    return true;
+  }
+  if (motorConnected){
+    Serial.println("⚠️ Motor connection lost! Reconnecting...");
+  }
+  motorConnected = false;
+
+  bool reconnected = connectToMotor();
+  if(reconnected){
+    justReconnected = true;
+  }
+  return reconnected;
+
+  return connectToMotor();
 }
 
 bool modbusReadHoldingRegisters(uint16_t startAddress, uint16_t numRegisters, uint16_t* data){
@@ -436,17 +499,66 @@ void stopMotor() {
   }
 }
 
+void performHoming(){
+  uint16_t homingCmd[1] = {1}; // Just 1, not bit-shifted!
+  uint16_t clearCmd[1] = {0};
+
+  if (modbusWriteMultipleRegisters(P_PRESET_EXECUTE, 1, homingCmd)) {
+    Serial.println("✓ set currect position to 0!");
+  }
+  delay(100);
+  if (modbusWriteMultipleRegisters(P_PRESET_EXECUTE, 1, clearCmd)) {
+    Serial.println("✓ set currect position to 0!");
+  }
+}
+
+bool checkAlarmsStatus()
+{
+  uint16_t alarmStatus[1];
+  if (modbusReadHoldingRegisters(ADDR_ALARM_MON, 1, alarmStatus)) {
+    if (alarmStatus[0] !=0 ) {
+      Serial.printf("✗ Alarm status: 0x%04X", alarmStatus[0]);
+      return true;
+    }
+  }
+  return false;
+}
+
+void clearAlarms(){
+  uint16_t clearCmd[1] = {1 << 7};
+  uint16_t resetCmd[1] = {0};
+
+  if (modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, clearCmd)) {
+    Serial.println("✓ Alarms cleared");
+    delay(100);
+    modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, resetCmd);
+  }
+}
+// MOTOR FUNCTIONS
+
+
+
 
 void loop() {
   M5.update();
   updateDMX();
 
-  if(motorConnected){
+
+  if(checkMotorConnection()){
+    if(justReconnected)
+    {
+      if(checkAlarmsStatus()){
+        clearAlarms();
+        performHoming();
+      }
+
+    startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
+
+    justReconnected = false;
+    }
     readMotorPosition();
     }
-
   
-
   yield(); // let system handble background task
   delay(1000/60);
 }
