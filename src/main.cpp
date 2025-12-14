@@ -1,11 +1,11 @@
-
 #include <M5Unified.h>  // M5 
 #include <SPI.h>   // M5 
 #include <esp_dmx.h> // DMX
 #include <M5Module_LAN.h> // M5 IP ADDRESS
 #include "motor_registers.h" // Oriental Motor Registers
 #include <esp_task_wdt.h>  // watchdog for unrebooting
-#include <UNIT_8ENCODER.h>       // M5Stack 8-Encoder Unit library
+#include <math.h>
+#include "angle8_control.h" 
 
 // ===============   DMX CONFIG   ===============
 #define DMX_TX_PIN GPIO_NUM_7 /// GPIO_NUM_7
@@ -14,9 +14,15 @@
 
 dmx_port_t dmxPort = DMX_NUM_1;  // Use UART1
 uint8_t data[DMX_PACKET_SIZE];   // DMX data buffer (513 bytes)
+const float GAMMA = 2.2;
+float calculateVariableSpeed(float current_brightness, float max_brightness, float base_speed);
 // ===============   DMX CONFIG   ===============
 
-
+// ===============   8ANGLE GLOBAL CONFIG   ===============
+M5_ANGLE8 angle8;
+bool angle8_found = false;
+AngleInputs angleInputs;
+// ===============   8ANGLE GLOBAL CONFIG   ===============
 
 // ===============  M5 IP CONFIG  ===============
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
@@ -43,16 +49,11 @@ float oriental_motorStopAcc = 0.2; //0.2-5
 
 
 
-// =============== ENCORDER DEFINE ===============
-UNIT_8ENCODER encoder;           // Create encoder object
-bool encoder_found = false;   
-// =============== ENCORDER DEFINE ===============
-
-
-
 // =============== FUNCTION DEFINE ===============
 void setupDMX();
 void updateDMX();
+void updateDMX_Manual();
+void updateDMX_Auto();
 void setupLAN();
 
 bool connectToMotor();
@@ -65,10 +66,6 @@ void clearAlarms();
 // =============== FUNCTION DEFINE ===============
 
 
-
-
-
-
 void setup() {
   auto cfg = M5.config();
   cfg.serial_baudrate = 115200;
@@ -77,24 +74,21 @@ void setup() {
 
   esp_task_wdt_delete(NULL);  // disable watchdog timer
 
-
-  // Initialize Encoder BEFORE LAN!
-  Serial.println("Initializing encoder...");
-  Wire.begin(2, 1);  // I2C for encoder
-
-  if(encoder.begin()) {  // ← Try to initialize
-    encoder_found = true;  // ← ASSIGNMENT is OK here!
-    M5.Display.setCursor(50, 10);
-    M5.Display.println("encoder_on");
+  // Initialize 8Angle unit
+  Serial.println("\nInitializing 8Angle...");
+  M5.Display.setCursor(0, 100);
+  if (angle8_found) {
+    M5.Display.setTextColor(GREEN);
+    M5.Display.println("8Angle: OK");
+    Serial.println("✓ 8Angle is connected!");
   } else {
-    encoder_found = false;
-    M5.Display.setCursor(50, 10);
-    M5.Display.println("encoder_off");
+    M5.Display.setTextColor(RED);
+    M5.Display.println("8Angle: FAIL");
+    Serial.println("✗ 8Angle NOT connected!");
   }
-  delay(500);
+  M5.Display.setTextColor(WHITE);
 
-
-
+  delay(1000);
 
   setupDMX();
   setupLAN();
@@ -132,30 +126,98 @@ void setupDMX(){
   M5.Display.printf("Bright:", data[1]);
   M5.Display.setCursor(0, 70);
   M5.Display.printf("Color:", data[2]);
-
   }
+  
+float calculateVariableSpeed(float current_brightness, float max_brightness, float base_speed) {
+  float min_speed = base_speed;   // Define minimum speed
+  float max_speed = base_speed + 1;   // Define maximum speed
+
+  float position = current_brightness / max_brightness;  // 0.0 to 1.0
+  float speed = base_speed + 1.6 * exp(-position * 10.0);
+  return speed; 
+}
 
 void updateDMX() {
-  static uint8_t brightness = 0.0; //range: 0-255
-  static uint8_t color = 0.0; //2700k(yellow)-6500k(white)
+  // Check mode switch and route to appropriate function
+  if (angleInputs.mode_switch == 0) {
+    // Switch 0 = Manual mode
+    updateDMX_Manual();
+  } else {
+    // Switch 1 = Auto mode
+    updateDMX_Auto();
+  }
+}
 
-  static int8_t brightness_dir = 1;  // 1 = getting brighter, -1 = getting dimmer
-  static int8_t color_dir = 1; // 1 = getting whiter, -1 = getting warmer
+void updateDMX_Manual() {
+  static float min_brightness = 20.0;   // Minimum brightness floor
+  static float max_brightness = 255.0;  // Maximum brightness
 
-  static uint8_t brightness_speed = 1;  // loop speed
-  static uint8_t color_speed = 1; // loop speed
+  // Map 8Angle inputs to DMX values
+  float brightness = mapBrightnessNonLinear(angleInputs.ch1, min_brightness, max_brightness);
+  float color = mapColorLinear(angleInputs.ch2);
 
-  brightness += brightness_dir * brightness_speed; 
+  // Clamp values
+  brightness = constrain(brightness, min_brightness, max_brightness);
+  color = constrain(color, 0.0, 255.0);
+
+  // Send to DMX
+  data[1] = (uint8_t)brightness;
+  data[2] = (uint8_t)color;
+
+  dmx_write(dmxPort, data, DMX_PACKET_SIZE);
+  dmx_send(dmxPort);
+  dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
+
+  // Display update
+  static uint32_t lastUpdate = 0;
+  if (millis() - lastUpdate > 100) {
+    lastUpdate = millis();
+
+    // Show mode
+    M5.Display.fillRect(0, 0, 320, 30, BLACK);
+    M5.Display.setCursor(0, 10);
+    M5.Display.setTextColor(CYAN);
+    M5.Display.println("MANUAL MODE");
+    M5.Display.setTextColor(WHITE);
+
+    // Show brightness value
+    M5.Display.fillRect(0, 40, 320, 20, BLACK);
+    M5.Display.setCursor(0, 40);
+    M5.Display.printf("Bright: %d", data[1]);
+
+    // Show color value
+    M5.Display.fillRect(0, 70, 320, 20, BLACK);
+    M5.Display.setCursor(0, 70);
+    M5.Display.printf("Color: %d", data[2]);
+  }
+}
+
+void updateDMX_Auto() {
+  // Static variables (keep as-is)
+  static float min_brightness = 50.0; 
+  static float max_brightness = 100.0;
+  static float brightness = min_brightness;
+  static float brightness_dir = 1;
+  static float base_speed = 0.5;  // Base speed setting
+  static float color = 0.0; //2700k(yellow)-6500k(white)
+  static float color_dir = 1; // 1 = getting whiter, -1 = getting warmer
+  static float color_speed = 0.1; // loop speed
+
+  float current_speed = calculateVariableSpeed(brightness, max_brightness, base_speed);
+
+  brightness += brightness_dir * current_speed;
+  if (brightness >= max_brightness) brightness_dir = -1;
+  if (brightness <= min_brightness) brightness_dir = 1;
+  brightness = constrain(brightness, min_brightness, max_brightness);  // CHANGED
+
   color += color_dir * color_speed;
-
-  if (brightness >= 50) brightness_dir = -1;  // Reverse direction at limits
-  if (brightness <= 0) brightness_dir = 1;
-
   if (color >= 255) color_dir = -1;   // Reverse direction at limits
   if (color <= 0) color_dir = 1;
+  color = constrain(color, 0.0, 255.0);
 
-  data[1] = brightness;
-  data[2] = color;
+  data[1] = (uint8_t)brightness;
+  data[2] = (uint8_t)color;
+
   dmx_write(dmxPort, data, DMX_PACKET_SIZE); // write
   dmx_send(dmxPort); // send
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
@@ -541,8 +603,9 @@ void clearAlarms(){
 
 void loop() {
   M5.update();
+  read8AngleInputs();
   updateDMX();
-
+  updateDMX_Auto();
 
   if(checkMotorConnection()){
     if(justReconnected)
