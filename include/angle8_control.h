@@ -24,8 +24,8 @@ extern AngleInputs angleInputs;
 
 bool init8Angle();
 void read8AngleInputs();
-float mapBrightnesssNonLinear(int16_t angle_value, float min_brightness, float max_brightness);
-float mapColorLinear(int16_t angle_value);
+float map_manual_BrightnesssNonLinear(int16_t angle_value, float min_brightness, float max_brightness);
+float map_manual_ColorLinear(int16_t angle_value);
 void update8AngleLEDs();
 
 inline bool init8Angle() {
@@ -73,26 +73,75 @@ inline void read8AngleInputs() {
   }
   
 
-inline float mapBrightnessNonLinear(int16_t angle_value, float min_brightness, float max_brightness) {
-    float normalized = angle_value / 4095.0;
+inline float map_manual_BrightnessNonLinear(int16_t angle_value, float min_brightness, float max_brightness) {
+      // Step 1: Normalize reversed input to 0.0-1.0
+      float normalized = (254.0 - angle_value) / 254.0;
+      normalized = constrain(normalized, 0.0, 1.0);
 
-    if (normalized < 0.0) normalized = 0.0;
-    if (normalized > 1.0) normalized = 1.0;
+      // Step 2: Apply non-linear curve (squared for smooth fade)
+      float curved = pow(normalized, 2.0);
 
-    float curved = pow(normalized, 2.0);
-    float brightness = min_brightness + (max_brightness - min_brightness) * curved;
+      // Step 3: Map to brightness range
+      float brightness = min_brightness + (max_brightness - min_brightness) * curved;
 
-    return brightness;
+      return brightness;
 }
 
-inline float mapColorLinear(int16_t angle_value) {
-    float color = (angle_value / 4095.0) * 255.0;
+inline float map_manual_ColorLinear(int16_t angle_value) {
+      // Map reversed input (254→0) to output (0→255)
+      float color = (254.0 - angle_value) * (255.0 / 254.0);
 
-    if (color < 0) color = 0;
-    if (color > 255) color = 255;
-
-    return color;
+      color = constrain(color, 0.0, 255.0);  // Store constrained value back into color
+      return color;  // Then return it
 }
 
+
+inline float map_auto_min_Brightness(int16_t angle_value) {
+      // Map reversed input (254→0) to output (0→255)
+      float min_brightness = (254.0 - angle_value) * (255.0 / 254.0);
+
+      min_brightness = constrain(min_brightness, 0.0, 255.0);  // Store constrained value back into color
+      return min_brightness;  // Then return it
+}
+
+
+inline float map_auto_max_Brightness(int16_t angle_value) {
+      // Map reversed input (254→0) to output (0→255)
+      float max_brightness = (254.0 - angle_value) * (255.0 / 254.0);
+
+      max_brightness = constrain(max_brightness, 0.0, 255.0);  // Store constrained value back into color
+      return max_brightness;  // Then return it
+}
+
+  inline float map_auto_base_Speed(int16_t angle_value) {
+      // Map to 0.1 - 2.0 range
+      float normalized = (254.0 - angle_value) / 254.0;  // 0.0 to 1.0
+      float base_speed = 0.1 + (normalized * 4.9);       // 0.1 to 2.0
+      return constrain(base_speed, 0.1, 5.0);
+  }
+
+inline float map_auto_min_Color(int16_t angle_value) {
+      // Map reversed input (254→0) to output (0→255)
+      float min_color = (254.0 - angle_value) * (255.0 / 254.0);
+
+      min_color = constrain(min_color, 0.0, 255.0);  // Store constrained value back into color
+      return min_color;  // Then return it
+}
+
+
+inline float map_auto_max_Color(int16_t angle_value) {
+      // Map reversed input (254→0) to output (0→255)
+      float max_color = (254.0 - angle_value) * (255.0 / 254.0);
+
+      max_color = constrain(max_color, 0.0, 255.0);  // Store constrained value back into color
+      return max_color;  // Then return it
+}
+
+inline float map_auto_color_Speed(int16_t angle_value) {
+      float normalized = (254.0 - angle_value) / 254.0;  // 0.0 to 1.0
+      float color_speed = 0.1 + (normalized * 4.9);       // 0.1 to 2.0
+      return constrain(color_speed, 0.1, 5.0);
+
+}
 
 #endif

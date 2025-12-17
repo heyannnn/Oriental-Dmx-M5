@@ -27,10 +27,14 @@ AngleInputs angleInputs;
 // ===============  M5 IP CONFIG  ===============
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
-IPAddress m5_ip(192, 168, 100, 30); 
+// IPAddress m5_ip(192, 168, 100, 30); 
+// IPAddress subnet(255, 255, 255, 0);
+// IPAddress gateway(192, 168, 100, 1);   // My PC/router
+// IPAddress dns(192, 168, 100, 1);   
+IPAddress m5_ip(192, 168, 1, 30); 
 IPAddress subnet(255, 255, 255, 0);
-IPAddress gateway(192, 168, 100, 1);   // My PC/router
-IPAddress dns(192, 168, 100, 1);       // Usually same
+IPAddress gateway(192, 168, 1, 1);   // My PC/router
+IPAddress dns(192, 168, 1, 1);       // Usually same
 
 M5Module_LAN LAN;
 EthernetClient modbusClient;
@@ -40,12 +44,16 @@ EthernetClient modbusClient;
 // ===============  ORIENTAL MOTOR ===============
 bool motorConnected = false;
 uint16_t transactionID = 0;
-bool justReconnected = false; 
+bool justReconnected = false;
 
 int32_t oriental_motorSpeed = -500; //500-5000 (swap direction -500)
 float oriental_motorStartAcc = 0.2; //0.2-5
 float oriental_motorStopAcc = 0.2; //0.2-5
 // ===============  ORIENTAL MOTOR ===============
+
+// ===============  DISPLAY FLAGS  ===============
+bool auto_mode_firstDraw = true;  // Global flag for auto mode display
+// ===============  DISPLAY FLAGS  ===============
 
 
 
@@ -83,7 +91,7 @@ void setup() {
     Serial.println("✓ 8Angle is connected!");
   } else {
     M5.Display.setTextColor(RED);
-    M5.Display.println("8Angle: FAIL");
+    // M5.Display.println("8Angle: FAIL");
     Serial.println("✗ 8Angle NOT connected!");
   }
   M5.Display.setTextColor(WHITE);
@@ -92,8 +100,9 @@ void setup() {
 
   setupDMX();
   setupLAN();
+  init8Angle();
   delay(1000);
-
+  
   connectToMotor();
 
   // ADD THIS: Start continuous rotation after connection
@@ -138,6 +147,14 @@ float calculateVariableSpeed(float current_brightness, float max_brightness, flo
 }
 
 void updateDMX() {
+  static uint8_t prev_mode = 255;
+
+  if (angleInputs.mode_switch != prev_mode) {
+    M5.Display.fillScreen(BLACK);
+    auto_mode_firstDraw = true;  // Reset auto mode display flag
+    prev_mode = angleInputs.mode_switch;
+  }
+
   // Check mode switch and route to appropriate function
   if (angleInputs.mode_switch == 0) {
     // Switch 0 = Manual mode
@@ -149,12 +166,24 @@ void updateDMX() {
 }
 
 void updateDMX_Manual() {
-  static float min_brightness = 20.0;   // Minimum brightness floor
+  static uint8_t last_mode_state = 255;
+
+  // Clear on entering manual mode (optional, for consistency)
+  if (last_mode_state != 0) {
+    last_mode_state = 0;
+    // Could add firstDraw here too if manual mode needs it
+  }
+
+  static float min_brightness = 0.0;   // Minimum brightness floor
   static float max_brightness = 255.0;  // Maximum brightness
 
   // Map 8Angle inputs to DMX values
-  float brightness = mapBrightnessNonLinear(angleInputs.ch1, min_brightness, max_brightness);
-  float color = mapColorLinear(angleInputs.ch2);
+  float brightness = map_manual_BrightnessNonLinear(angleInputs.ch1, min_brightness, max_brightness);
+  float color = map_manual_ColorLinear(angleInputs.ch2);
+
+  // ADD THIS DEBUG OUTPUT:
+  Serial.printf("Raw CH1: %d -> Brightness: %.1f\n", angleInputs.ch1, brightness);
+  Serial.printf("Raw CH2: %d -> Color: %.1f\n", angleInputs.ch2, color);
 
   // Clamp values
   brightness = constrain(brightness, min_brightness, max_brightness);
@@ -190,30 +219,83 @@ void updateDMX_Manual() {
     M5.Display.setCursor(0, 70);
     M5.Display.printf("Color: %d", data[2]);
   }
+  
 }
 
 void updateDMX_Auto() {
-  // Static variables (keep as-is)
-  static float min_brightness = 50.0; 
-  static float max_brightness = 100.0;
-  static float brightness = min_brightness;
-  static float brightness_dir = 1;
-  static float base_speed = 0.5;  // Base speed setting
-  static float color = 0.0; //2700k(yellow)-6500k(white)
-  static float color_dir = 1; // 1 = getting whiter, -1 = getting warmer
-  static float color_speed = 0.1; // loop speed
+  // === STATE VARIABLES (keep between loop calls) ===
+  static float brightness = 0.0;    // Current brightness value
+  static float brightness_dir = 1;    // 1 = increasing, -1 = decreasing
+
+  static float color = 0.0;         // Current color value
+  static float color_dir = 1;         // 1 = increasing, -1 = decreasing
+
+  // === STEP 1: Read and map knob inputs ===
+  // Map CH1 (raw 0-254) to min_brightness (0-255)
+  float min_brightness = map_auto_min_Brightness(angleInputs.ch1);
+  float max_brightness = map_auto_max_Brightness(angleInputs.ch2);
+  float base_speed = map_auto_base_Speed(angleInputs.ch3); // Base speed setting
+  
+  if (min_brightness > max_brightness) {
+    float temp = min_brightness;
+    min_brightness = max_brightness;
+    max_brightness = temp;
+  }
+
+  // Prevent zero or negative ranges
+  if (max_brightness < 1.0) {
+    max_brightness = 1.0;  // Minimum value to prevent division by zero
+  }
+  if (min_brightness < 0.0) {
+    min_brightness = 0.0;
+  }
 
   float current_speed = calculateVariableSpeed(brightness, max_brightness, base_speed);
 
+  // Update brightness position
   brightness += brightness_dir * current_speed;
-  if (brightness >= max_brightness) brightness_dir = -1;
-  if (brightness <= min_brightness) brightness_dir = 1;
-  brightness = constrain(brightness, min_brightness, max_brightness);  // CHANGED
 
+  // Check boundaries and reverse direction
+  if (brightness >= max_brightness) {
+    brightness = max_brightness;
+    brightness_dir = -1;  // Start going down
+  }
+  if (brightness <= min_brightness) {
+    brightness = min_brightness;
+    brightness_dir = 1;   // Start going up
+  }
+
+  // Safety clamp
+  brightness = constrain(brightness, min_brightness, max_brightness);
+
+  float min_color = map_auto_min_Color(angleInputs.ch4);
+  float max_color = map_auto_max_Color(angleInputs.ch5);
+  float color_speed = map_auto_color_Speed(angleInputs.ch6); // Base speed setting
+
+  // Update color position
   color += color_dir * color_speed;
-  if (color >= 255) color_dir = -1;   // Reverse direction at limits
-  if (color <= 0) color_dir = 1;
-  color = constrain(color, 0.0, 255.0);
+
+  // Validate color range
+  if (min_color > max_color) {
+    float temp = min_color;
+    min_color = max_color;
+    max_color = temp;
+  }
+  if (max_color < 1.0) max_color = 1.0;
+  if (min_color < 0.0) min_color = 0.0;
+
+  // Check boundaries and reverse direction
+  if (color >= max_color) {
+    color = max_color;
+    color_dir = -1;
+  }
+  if (color <= min_color) {
+    color = min_color;
+    color_dir = 1;
+  }
+
+  // Safety clamp
+  color = constrain(color, min_color, max_color);
 
   data[1] = (uint8_t)brightness;
   data[2] = (uint8_t)color;
@@ -222,20 +304,80 @@ void updateDMX_Auto() {
   dmx_send(dmxPort); // send
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
 
-  static uint32_t lastUpdate = 0; // print the value
+  // === Display Update ===
+  static uint32_t lastUpdate = 0;
+
   if (millis() - lastUpdate > 100) {
     lastUpdate = millis();
 
-    // Clear and update brightness number
-    M5.Display.fillRect(100, 40, 60, 16, BLACK);
-    M5.Display.setCursor(100, 40);
-    M5.Display.print(data[1]);
+    // Draw static labels ONLY on first draw (use global flag)
+    if (auto_mode_firstDraw) {
+      M5.Display.fillScreen(BLACK);  // Clear once
+      M5.Display.setTextColor(CYAN);
+      M5.Display.setCursor(0, 0);
+      M5.Display.println("AUTO MODE");
+      M5.Display.setTextColor(WHITE);
 
-    // Clear and update color number
-    M5.Display.fillRect(100, 70, 60, 16, BLACK);
+      // Draw labels that never change
+      M5.Display.setCursor(0, 30);
+      M5.Display.print("Min Bri:");
+      M5.Display.setCursor(0, 50);
+      M5.Display.print("Max Bri:");
+      M5.Display.setCursor(0, 70);
+      M5.Display.print("Bri Spd:");
+
+      M5.Display.setCursor(0, 100);
+      M5.Display.print("Min Col:");
+      M5.Display.setCursor(0, 120);
+      M5.Display.print("Max Col:");
+      M5.Display.setCursor(0, 140);
+      M5.Display.print("Col Spd:");
+
+      M5.Display.setTextColor(GREEN);
+      M5.Display.setCursor(0, 170);
+      M5.Display.print("-> Bri:");
+      M5.Display.setCursor(0, 190);
+      M5.Display.print("-> Col:");
+      M5.Display.setTextColor(WHITE);
+
+      auto_mode_firstDraw = false;
+    }
+
+    // Update ONLY the numbers (clear small area, redraw)
+    M5.Display.fillRect(100, 30, 80, 16, BLACK);  // Clear just the number area
+    M5.Display.setCursor(100, 30);
+    M5.Display.printf("%d", (int)min_brightness);
+
+    M5.Display.fillRect(100, 50, 80, 16, BLACK);
+    M5.Display.setCursor(100, 50);
+    M5.Display.printf("%d", (int)max_brightness);
+
+    M5.Display.fillRect(100, 70, 80, 16, BLACK);
     M5.Display.setCursor(100, 70);
-    M5.Display.print(data[2]);
-}
+    M5.Display.printf("%.2f", base_speed);
+
+    M5.Display.fillRect(100, 100, 80, 16, BLACK);
+    M5.Display.setCursor(100, 100);
+    M5.Display.printf("%d", (int)min_color);
+
+    M5.Display.fillRect(100, 120, 80, 16, BLACK);
+    M5.Display.setCursor(100, 120);
+    M5.Display.printf("%d", (int)max_color);
+
+    M5.Display.fillRect(100, 140, 80, 16, BLACK);
+    M5.Display.setCursor(100, 140);
+    M5.Display.printf("%.2f", color_speed);
+
+    M5.Display.fillRect(100, 170, 80, 16, BLACK);
+    M5.Display.setCursor(100, 170);
+    M5.Display.setTextColor(GREEN);
+    M5.Display.printf("%d", data[1]);
+
+    M5.Display.fillRect(100, 190, 80, 16, BLACK);
+    M5.Display.setCursor(100, 190);
+    M5.Display.printf("%d", data[2]);
+    M5.Display.setTextColor(WHITE);
+  }
 }
 
 void setupLAN() {
@@ -289,7 +431,9 @@ bool connectToMotor(){
   Serial.println("Connecting to motor...");
   IPAddress motor_ip = MOTOR_IP_ADDRESS;
   uint16_t motor_port = MOTOR_PORT;
-
+  Serial.printf("M5 IP: %s\n", LAN.localIP().toString().c_str());  // ← Add this
+  Serial.printf("Motor IP: %s\n", motor_ip.toString().c_str());     // ← Add this
+  Serial.printf("Motor Port: %d\n", motor_port);  
   if (modbusClient.connect(motor_ip, motor_port)) {
       motorConnected = true;
       Serial.println("Motor Connected");
@@ -605,7 +749,7 @@ void loop() {
   M5.update();
   read8AngleInputs();
   updateDMX();
-  updateDMX_Auto();
+
 
   if(checkMotorConnection()){
     if(justReconnected)
@@ -624,5 +768,5 @@ void loop() {
   
   yield(); // let system handble background task
   delay(1000/60);
+  
 }
-

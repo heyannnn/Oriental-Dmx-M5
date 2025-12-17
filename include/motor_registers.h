@@ -12,7 +12,9 @@
 #include <IPAddress.h>
 
 // ===== MOTOR NETWORK CONFIG =====
-#define MOTOR_IP_ADDRESS IPAddress(192, 168, 100, 10)   // Oriental Motor IP as string
+//#define MOTOR_IP_ADDRESS IPAddress(192, 168, 100, 10)   // Oriental Motor IP as string
+#define MOTOR_IP_ADDRESS IPAddress(192, 168, 1, 1)   // Oriental Motor IP as string
+
 #define MOTOR_PORT 502              // Modbus TCP port
 #define MOTOR_SLAVE_ID 0          // Modbus slave ID
 
