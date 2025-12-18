@@ -25,11 +25,11 @@ AngleInputs angleInputs;
 // ===============   8ANGLE GLOBAL CONFIG   ===============
 
 // Fallback auto mode parameters (when 8Angle not available)
-float fallback_min_brightness = 20.0;    // 0-255
-float fallback_max_brightness = 80.0;  // 0-255
+float fallback_min_brightness = 50.0;    // 0-255
+float fallback_max_brightness = 255.0;  // 0-255
 float fallback_brightness_speed = 0.5;  // 0.1-5.0
 float fallback_min_color = 1.0;         // 0-255
-float fallback_max_color = 50.0;       // 0-255
+float fallback_max_color = 2.0;       // 0-255
 float fallback_color_speed = 0.5;       // 0.1-5.0
 // ===============   8ANGLE GLOBAL CONFIG   ===============
 
@@ -56,7 +56,7 @@ bool motorConnected = false;
 uint16_t transactionID = 0;
 bool justReconnected = false;
 
-int32_t oriental_motorSpeed = -500; //500-5000 (swap direction -500)
+int32_t oriental_motorSpeed = -50; //500-5000 (swap direction -500)
 float oriental_motorStartAcc = 0.2; //0.2-5
 float oriental_motorStopAcc = 0.2; //0.2-5
 // ===============  ORIENTAL MOTOR ===============
@@ -81,6 +81,12 @@ void startContinuousSpeedControl(int32_t speed, float startAcc, float stopAcc);
 void performHoming();
 bool checkAlarmsStatus();
 void clearAlarms();
+
+// ADD THESE TWO LINES:
+bool modbusReadHoldingRegisters(uint16_t startAddress, 
+uint16_t numRegisters, uint16_t* data);
+bool modbusWriteMultipleRegisters(uint16_t startAddress,
+uint16_t numRegisters, uint16_t* data);
 // =============== FUNCTION DEFINE ===============
 
 
@@ -112,13 +118,13 @@ void setup() {
   setupDMX();
 
   //DMX GOOD, M5 IP BAD
-  setupLAN();
-  init8Angle(); 
+  // setupLAN();
+  // init8Angle(); 
  
   //M5 IP GOOD, DMX BAD, but DMX auto move without 8 angle
-  // init8Angle(); 
-  // Wire.begin(G2, G1, 400000); 
-  // setupLAN();
+  init8Angle(); 
+  Wire.begin(G2, G1, 400000); 
+  setupLAN();
 
   
   
@@ -132,6 +138,25 @@ void setup() {
     delay(1000);  // Wait 1 second after connection
     if(checkAlarmsStatus()){
       clearAlarms();
+      
+      
+    delay(500);  // Wait for alarm clear to process
+
+    // SEND SERVO ON command
+    Serial.println("Sending SERVO ON...");
+    uint16_t servoOn[1] = {0x0001};  // Bit 0 = SERVO ON
+    if(modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, servoOn)) {
+      Serial.println("✓ SERVO ON sent");
+      delay(200);  // Wait for servo to enable and brake to release
+    }
+    
+    uint16_t statusData[1];
+    if (modbusReadHoldingRegisters(0x007D, 1, statusData)) {
+      // Status register
+      Serial.printf("Motor status: 0x%04X\n", statusData[0]);
+      Serial.printf("  Servo ON: %s\n", (statusData[0] &    0x01) ? "YES" : "NO");
+    }
+
       performHoming();
     }
     Serial.println("\n🎪 INSTALLATION MODE");
@@ -424,12 +449,12 @@ void updateDMX_Auto() {
     M5.Display.setCursor(100, 140);
     M5.Display.printf("%.2f", color_speed);
 
-    M5.Display.fillRect(100, 170, 80, 16, BLACK);
+    M5.Display.fillRect(100, 170, 40, 16, BLACK);
     M5.Display.setCursor(100, 170);
     M5.Display.setTextColor(GREEN);
     M5.Display.printf("%d", data[1]);
 
-    M5.Display.fillRect(100, 190, 80, 16, BLACK);
+    M5.Display.fillRect(100, 190, 40, 16, BLACK);
     M5.Display.setCursor(100, 190);
     M5.Display.printf("%d", data[2]);
     M5.Display.setTextColor(WHITE);
@@ -495,16 +520,16 @@ bool connectToMotor(){
   if (modbusClient.connect(motor_ip, motor_port)) {
       motorConnected = true;
       Serial.println("Motor Connected");
-      M5.Display.fillRect(0, 150, 320, 20, BLACK);
-      M5.Display.setCursor(0, 150);
+      M5.Display.fillRect(150, 180, 320, 20, BLACK);
+      M5.Display.setCursor(150, 180);
       M5.Display.setTextColor(GREEN);
       M5.Display.println("Motor: Connected!");
       M5.Display.setTextColor(WHITE);
       return true;
     }
   Serial.println("Motor Connection FAILED!");
-  M5.Display.fillRect(0, 150, 320, 20, BLACK);
-  M5.Display.setCursor(0, 150);
+  M5.Display.fillRect(150, 180, 320, 20, BLACK);
+  M5.Display.setCursor(150, 180);
   M5.Display.setTextColor(RED);
   M5.Display.println("Motor: Failed!");
   M5.Display.setTextColor(WHITE);
@@ -536,8 +561,10 @@ bool modbusReadHoldingRegisters(uint16_t startAddress, uint16_t numRegisters, ui
     return false;
   }
 
+
   uint8_t request[12];
   transactionID++;
+
 
   //Modbus Apllication Protocal
   request[0] = (transactionID >> 8) & 0xFF; // Transaction ID high byte
@@ -617,6 +644,7 @@ bool modbusWriteMultipleRegisters(uint16_t startAddress, uint16_t numRegisters, 
     return false;
   }
 
+
 // Calculate PDU length: 1 (func) + 2 (addr) + 2 (count) + 1 (byte count) + data bytes
 uint8_t byteCount = numRegisters * 2;  // MBAP header (7) + PDU (6 + data)
 uint16_t pduLength = 7 + byteCount;
@@ -686,7 +714,7 @@ return true;
 
 void readMotorPosition() {
   static uint32_t lastRead = 0;
-  if (millis() - lastRead > 100){
+  if (millis() - lastRead > 500){
     lastRead = millis();
     Serial.println("\n--- Reading Motor Position ---");
     uint16_t posData[2]; // Position is 32-bit = 2 registers
@@ -695,8 +723,8 @@ void readMotorPosition() {
       // Combine two 16-bit registers into one 32-bit position
       int32_t position = ((int32_t)posData[0] << 16) | posData[1];
       // M5 Display
-      M5.Display.fillRect(0, 180, 320, 20, BLACK);
-      M5.Display.setCursor(0, 180);
+      M5.Display.fillRect(0, 220, 320, 20, BLACK);
+      M5.Display.setCursor(0, 220);
       M5.Display.printf("Pos: %d", position);
     } else {
       Serial.println("✗ Failed to read position");
@@ -804,6 +832,10 @@ void clearAlarms(){
 
 
 void loop() {
+  static uint32_t lastLoopTime = 0;
+  static uint32_t maxLoopTime = 0;
+  uint32_t loopStart = micros();
+
   M5.update();
   read8AngleInputs();
   updateDMX();
@@ -823,8 +855,14 @@ void loop() {
     }
     readMotorPosition();
     }
-  
+
+
+
   yield(); // let system handble background task
+
+ 
+
+
   delay(1000/60);
   
 }
