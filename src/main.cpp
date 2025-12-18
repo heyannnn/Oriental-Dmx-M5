@@ -24,6 +24,16 @@ bool angle8_found = false;
 AngleInputs angleInputs;
 // ===============   8ANGLE GLOBAL CONFIG   ===============
 
+// Fallback auto mode parameters (when 8Angle not available)
+float fallback_min_brightness = 20.0;    // 0-255
+float fallback_max_brightness = 80.0;  // 0-255
+float fallback_brightness_speed = 0.5;  // 0.1-5.0
+float fallback_min_color = 1.0;         // 0-255
+float fallback_max_color = 50.0;       // 0-255
+float fallback_color_speed = 0.5;       // 0.1-5.0
+// ===============   8ANGLE GLOBAL CONFIG   ===============
+
+
 // ===============  M5 IP CONFIG  ===============
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
@@ -33,8 +43,8 @@ byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 // IPAddress dns(192, 168, 100, 1);   
 IPAddress m5_ip(192, 168, 1, 30); 
 IPAddress subnet(255, 255, 255, 0);
-IPAddress gateway(192, 168, 1, 1);   // My PC/router
-IPAddress dns(192, 168, 1, 1);       // Usually same
+IPAddress gateway(0, 0, 0, 0);   // My PC/router
+IPAddress dns(0, 0, 0, 0);       // Usually same
 
 M5Module_LAN LAN;
 EthernetClient modbusClient;
@@ -81,6 +91,7 @@ void setup() {
   M5.Display.setTextSize(1.5);
 
   esp_task_wdt_delete(NULL);  // disable watchdog timer
+  
 
   // Initialize 8Angle unit
   Serial.println("\nInitializing 8Angle...");
@@ -97,12 +108,23 @@ void setup() {
   M5.Display.setTextColor(WHITE);
 
   delay(1000);
-
-  setupDMX();
-  setupLAN();
-  init8Angle();
-  delay(1000);
   
+  setupDMX();
+
+  //DMX GOOD, M5 IP BAD
+  setupLAN();
+  init8Angle(); 
+ 
+  //M5 IP GOOD, DMX BAD, but DMX auto move without 8 angle
+  // init8Angle(); 
+  // Wire.begin(G2, G1, 400000); 
+  // setupLAN();
+
+  
+  
+
+  delay(1000);
+
   connectToMotor();
 
   // ADD THIS: Start continuous rotation after connection
@@ -148,21 +170,35 @@ float calculateVariableSpeed(float current_brightness, float max_brightness, flo
 
 void updateDMX() {
   static uint8_t prev_mode = 255;
+  // Force auto mode if 8Angle not found
+  uint8_t current_mode = angle8_found ? angleInputs.mode_switch : 1;
 
-  if (angleInputs.mode_switch != prev_mode) {
+  if (current_mode != prev_mode) {
     M5.Display.fillScreen(BLACK);
-    auto_mode_firstDraw = true;  // Reset auto mode display flag
-    prev_mode = angleInputs.mode_switch;
+    auto_mode_firstDraw = true;
+    prev_mode = current_mode;
   }
 
-  // Check mode switch and route to appropriate function
-  if (angleInputs.mode_switch == 0) {
-    // Switch 0 = Manual mode
+  if (current_mode == 0) {
     updateDMX_Manual();
   } else {
-    // Switch 1 = Auto mode
     updateDMX_Auto();
   }
+
+  // if (angleInputs.mode_switch != prev_mode) {
+  //   M5.Display.fillScreen(BLACK);
+  //   auto_mode_firstDraw = true;  // Reset auto mode display flag
+  //   prev_mode = angleInputs.mode_switch;
+  // }
+
+  // // Check mode switch and route to appropriate function
+  // if (angleInputs.mode_switch == 0) {
+  //   // Switch 0 = Manual mode
+  //   updateDMX_Manual();
+  // } else {
+  //   // Switch 1 = Auto mode
+  //   updateDMX_Auto();
+  // }
 }
 
 void updateDMX_Manual() {
@@ -226,15 +262,35 @@ void updateDMX_Auto() {
   // === STATE VARIABLES (keep between loop calls) ===
   static float brightness = 0.0;    // Current brightness value
   static float brightness_dir = 1;    // 1 = increasing, -1 = decreasing
-
   static float color = 0.0;         // Current color value
   static float color_dir = 1;         // 1 = increasing, -1 = decreasing
 
+  // Use fallback values if 8Angle not found
+  float min_brightness, max_brightness, base_speed;
+  float min_color, max_color, color_speed;
+  
+  if (angle8_found){
+      // Read from 8Angle knobs
+      min_brightness =  map_auto_min_Brightness(angleInputs.ch1);
+      max_brightness =  map_auto_max_Brightness(angleInputs.ch2);
+      base_speed =  map_auto_base_Speed(angleInputs.ch3);
+      min_color =  map_auto_min_Color(angleInputs.ch4);
+      max_color =  map_auto_max_Color(angleInputs.ch5);
+      color_speed =  map_auto_color_Speed(angleInputs.ch6);
+    } else {
+      // Use fallback hardcoded values
+      min_brightness = fallback_min_brightness;
+      max_brightness = fallback_max_brightness;
+      base_speed = fallback_brightness_speed;
+      min_color = fallback_min_color;
+      max_color = fallback_max_color;
+      color_speed = fallback_color_speed;
+    }
   // === STEP 1: Read and map knob inputs ===
   // Map CH1 (raw 0-254) to min_brightness (0-255)
-  float min_brightness = map_auto_min_Brightness(angleInputs.ch1);
-  float max_brightness = map_auto_max_Brightness(angleInputs.ch2);
-  float base_speed = map_auto_base_Speed(angleInputs.ch3); // Base speed setting
+  // float min_brightness = map_auto_min_Brightness(angleInputs.ch1);
+  // float max_brightness = map_auto_max_Brightness(angleInputs.ch2);
+  // float base_speed = map_auto_base_Speed(angleInputs.ch3); // Base speed setting
   
   if (min_brightness > max_brightness) {
     float temp = min_brightness;
@@ -268,9 +324,9 @@ void updateDMX_Auto() {
   // Safety clamp
   brightness = constrain(brightness, min_brightness, max_brightness);
 
-  float min_color = map_auto_min_Color(angleInputs.ch4);
-  float max_color = map_auto_max_Color(angleInputs.ch5);
-  float color_speed = map_auto_color_Speed(angleInputs.ch6); // Base speed setting
+  // float min_color = map_auto_min_Color(angleInputs.ch4);
+  // float max_color = map_auto_max_Color(angleInputs.ch5);
+  // float color_speed = map_auto_color_Speed(angleInputs.ch6); // Base speed setting
 
   // Update color position
   color += color_dir * color_speed;
@@ -384,11 +440,12 @@ void setupLAN() {
   // Serial.println("Init SPI...");
   // SPI.begin(SCK, MISO, MOSI, -1);
 
-  M5.Ex_I2C.release();
+  //M5.Ex_I2C.release();
   LAN.setResetPin(GPIO_NUM_13);
   LAN.reset();
   LAN.init(1);  // CS pin = 1 for CoreS3
-  LAN.begin(mac, m5_ip, dns, gateway, subnet);  // Forstatic IP
+  //LAN.begin(mac, m5_ip, dns, gateway, subnet);  // Forstatic IP
+  LAN.begin(mac, m5_ip, gateway, subnet);
   delay(500);
 
   uint8_t hwStatus = LAN.hardwareStatus();
@@ -420,6 +477,7 @@ void setupLAN() {
   M5.Display.println();
   M5.Display.print("IP = ");
   M5.Display.println(LAN.localIP());
+  // Wire.begin(G2, G1);
 }
 
 

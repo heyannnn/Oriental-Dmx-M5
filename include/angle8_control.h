@@ -29,6 +29,7 @@ float map_manual_ColorLinear(int16_t angle_value);
 void update8AngleLEDs();
 
 inline bool init8Angle() {
+    Wire.begin(G2, G1, 400000);      
     Serial.println("Initializing 8Angle...");
 
     if(angle8.begin()) {  // Frequency defaults to 100000
