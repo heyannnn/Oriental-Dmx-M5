@@ -30,6 +30,7 @@
 // ダイレクトデータ運転 (Direct Data Operation)
 #define ADDR_TRIG_MODE      0x0106  // トリガーモード
 
+
 // パラメータ読み書き用レジスタ
 #define ADDR_READ_PARAM_ID_R    0x012B
 #define ADDR_READ_WRITE_STATUS  0x012C

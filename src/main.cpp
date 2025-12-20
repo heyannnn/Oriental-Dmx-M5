@@ -11,36 +11,33 @@
 #define DMX_TX_PIN GPIO_NUM_7 /// GPIO_NUM_7
 #define DMX_RX_PIN GPIO_NUM_10 // GPIO_NUM_10
 #define DMX_EN_PIN GPIO_NUM_6 // GPIO_NUM_6
-
 dmx_port_t dmxPort = DMX_NUM_1;  // Use UART1
 uint8_t data[DMX_PACKET_SIZE];   // DMX data buffer (513 bytes)
 const float GAMMA = 2.2;
 float calculateVariableSpeed(float current_brightness, float max_brightness, float base_speed);
 // ===============   DMX CONFIG   ===============
 
+
+
 // ===============   8ANGLE GLOBAL CONFIG   ===============
 M5_ANGLE8 angle8;
 bool angle8_found = false;
 AngleInputs angleInputs;
-// ===============   8ANGLE GLOBAL CONFIG   ===============
 
-// Fallback auto mode parameters (when 8Angle not available)
+
+// ===============   DMX LOOP 8ANGLE GLOBAL CONFIG   ===============
 float fallback_min_brightness = 50.0;    // 0-255
 float fallback_max_brightness = 255.0;  // 0-255
 float fallback_brightness_speed = 0.5;  // 0.1-5.0
 float fallback_min_color = 1.0;         // 0-255
-float fallback_max_color = 2.0;       // 0-255
+float fallback_max_color = 50.0;       // 0-255
 float fallback_color_speed = 0.5;       // 0.1-5.0
-// ===============   8ANGLE GLOBAL CONFIG   ===============
+// ===============   DMX LOOP 8ANGLE GLOBAL CONFIG   ===============
 
 
 // ===============  M5 IP CONFIG  ===============
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
-
-// IPAddress m5_ip(192, 168, 100, 30); 
-// IPAddress subnet(255, 255, 255, 0);
-// IPAddress gateway(192, 168, 100, 1);   // My PC/router
-// IPAddress dns(192, 168, 100, 1);   
+ 
 IPAddress m5_ip(192, 168, 1, 30); 
 IPAddress subnet(255, 255, 255, 0);
 IPAddress gateway(0, 0, 0, 0);   // My PC/router
@@ -56,10 +53,14 @@ bool motorConnected = false;
 uint16_t transactionID = 0;
 bool justReconnected = false;
 
-int32_t oriental_motorSpeed = -50; //500-5000 (swap direction -500)
-float oriental_motorStartAcc = 0.2; //0.2-5
-float oriental_motorStopAcc = 0.2; //0.2-5
-// ===============  ORIENTAL MOTOR ===============
+
+// ===============  MOTOR SPEED  ===============
+int32_t oriental_motorSpeed = -50; //swap direction +50 or -50
+float oriental_motorStartAcc = 0.2; //
+float oriental_motorStopAcc = 0.2; //
+// ===============  MOTOR SPEED  ===============
+
+
 
 // ===============  DISPLAY FLAGS  ===============
 bool auto_mode_firstDraw = true;  // Global flag for auto mode display
@@ -82,7 +83,7 @@ void performHoming();
 bool checkAlarmsStatus();
 void clearAlarms();
 
-// ADD THESE TWO LINES:
+
 bool modbusReadHoldingRegisters(uint16_t startAddress, 
 uint16_t numRegisters, uint16_t* data);
 bool modbusWriteMultipleRegisters(uint16_t startAddress,
@@ -98,8 +99,6 @@ void setup() {
 
   esp_task_wdt_delete(NULL);  // disable watchdog timer
   
-
-  // Initialize 8Angle unit
   Serial.println("\nInitializing 8Angle...");
   M5.Display.setCursor(0, 100);
   if (angle8_found) {
@@ -108,7 +107,6 @@ void setup() {
     Serial.println("✓ 8Angle is connected!");
   } else {
     M5.Display.setTextColor(RED);
-    // M5.Display.println("8Angle: FAIL");
     Serial.println("✗ 8Angle NOT connected!");
   }
   M5.Display.setTextColor(WHITE);
@@ -116,6 +114,7 @@ void setup() {
   delay(1000);
   
   setupDMX();
+
 
   //DMX GOOD, M5 IP BAD
   // setupLAN();
@@ -127,21 +126,17 @@ void setup() {
   setupLAN();
 
   
-  
-
   delay(1000);
-
   connectToMotor();
 
-  // ADD THIS: Start continuous rotation after connection
   if (motorConnected) {
-    delay(1000);  // Wait 1 second after connection
+    delay(1000);  
+    
     if(checkAlarmsStatus()){
       clearAlarms();
-      
-      
-    delay(500);  // Wait for alarm clear to process
-
+      delay(500);  
+    }
+    
     // SEND SERVO ON command
     Serial.println("Sending SERVO ON...");
     uint16_t servoOn[1] = {0x0001};  // Bit 0 = SERVO ON
@@ -149,7 +144,7 @@ void setup() {
       Serial.println("✓ SERVO ON sent");
       delay(200);  // Wait for servo to enable and brake to release
     }
-    
+
     uint16_t statusData[1];
     if (modbusReadHoldingRegisters(0x007D, 1, statusData)) {
       // Status register
@@ -157,8 +152,8 @@ void setup() {
       Serial.printf("  Servo ON: %s\n", (statusData[0] &    0x01) ? "YES" : "NO");
     }
 
-      performHoming();
-    }
+    performHoming();
+    
     Serial.println("\n🎪 INSTALLATION MODE");
     Serial.println("Starting continuous rotation...\n");
 
@@ -209,30 +204,13 @@ void updateDMX() {
   } else {
     updateDMX_Auto();
   }
-
-  // if (angleInputs.mode_switch != prev_mode) {
-  //   M5.Display.fillScreen(BLACK);
-  //   auto_mode_firstDraw = true;  // Reset auto mode display flag
-  //   prev_mode = angleInputs.mode_switch;
-  // }
-
-  // // Check mode switch and route to appropriate function
-  // if (angleInputs.mode_switch == 0) {
-  //   // Switch 0 = Manual mode
-  //   updateDMX_Manual();
-  // } else {
-  //   // Switch 1 = Auto mode
-  //   updateDMX_Auto();
-  // }
 }
 
 void updateDMX_Manual() {
   static uint8_t last_mode_state = 255;
 
-  // Clear on entering manual mode (optional, for consistency)
   if (last_mode_state != 0) {
     last_mode_state = 0;
-    // Could add firstDraw here too if manual mode needs it
   }
 
   static float min_brightness = 0.0;   // Minimum brightness floor
@@ -260,7 +238,7 @@ void updateDMX_Manual() {
 
   // Display update
   static uint32_t lastUpdate = 0;
-  if (millis() - lastUpdate > 100) {
+  if (millis() - lastUpdate > 50) {
     lastUpdate = millis();
 
     // Show mode
@@ -295,7 +273,6 @@ void updateDMX_Auto() {
   float min_color, max_color, color_speed;
   
   if (angle8_found){
-      // Read from 8Angle knobs
       min_brightness =  map_auto_min_Brightness(angleInputs.ch1);
       max_brightness =  map_auto_max_Brightness(angleInputs.ch2);
       base_speed =  map_auto_base_Speed(angleInputs.ch3);
@@ -310,13 +287,7 @@ void updateDMX_Auto() {
       min_color = fallback_min_color;
       max_color = fallback_max_color;
       color_speed = fallback_color_speed;
-    }
-  // === STEP 1: Read and map knob inputs ===
-  // Map CH1 (raw 0-254) to min_brightness (0-255)
-  // float min_brightness = map_auto_min_Brightness(angleInputs.ch1);
-  // float max_brightness = map_auto_max_Brightness(angleInputs.ch2);
-  // float base_speed = map_auto_base_Speed(angleInputs.ch3); // Base speed setting
-  
+    }  
   if (min_brightness > max_brightness) {
     float temp = min_brightness;
     min_brightness = max_brightness;
@@ -348,10 +319,6 @@ void updateDMX_Auto() {
 
   // Safety clamp
   brightness = constrain(brightness, min_brightness, max_brightness);
-
-  // float min_color = map_auto_min_Color(angleInputs.ch4);
-  // float max_color = map_auto_max_Color(angleInputs.ch5);
-  // float color_speed = map_auto_color_Speed(angleInputs.ch6); // Base speed setting
 
   // Update color position
   color += color_dir * color_speed;
@@ -388,18 +355,16 @@ void updateDMX_Auto() {
   // === Display Update ===
   static uint32_t lastUpdate = 0;
 
-  if (millis() - lastUpdate > 100) {
+  if (millis() - lastUpdate > 50) {
     lastUpdate = millis();
 
-    // Draw static labels ONLY on first draw (use global flag)
     if (auto_mode_firstDraw) {
-      M5.Display.fillScreen(BLACK);  // Clear once
+      M5.Display.fillScreen(BLACK); 
       M5.Display.setTextColor(CYAN);
       M5.Display.setCursor(0, 0);
       M5.Display.println("AUTO MODE");
       M5.Display.setTextColor(WHITE);
 
-      // Draw labels that never change
       M5.Display.setCursor(0, 30);
       M5.Display.print("Min Bri:");
       M5.Display.setCursor(0, 50);
@@ -424,8 +389,7 @@ void updateDMX_Auto() {
       auto_mode_firstDraw = false;
     }
 
-    // Update ONLY the numbers (clear small area, redraw)
-    M5.Display.fillRect(100, 30, 80, 16, BLACK);  // Clear just the number area
+    M5.Display.fillRect(100, 30, 80, 16, BLACK);
     M5.Display.setCursor(100, 30);
     M5.Display.printf("%d", (int)min_brightness);
 
@@ -462,28 +426,24 @@ void updateDMX_Auto() {
 }
 
 void setupLAN() {
-  // Serial.println("Init SPI...");
-  // SPI.begin(SCK, MISO, MOSI, -1);
-
   //M5.Ex_I2C.release();
   LAN.setResetPin(GPIO_NUM_13);
   LAN.reset();
   LAN.init(1);  // CS pin = 1 for CoreS3
-  //LAN.begin(mac, m5_ip, dns, gateway, subnet);  // Forstatic IP
   LAN.begin(mac, m5_ip, gateway, subnet);
   delay(500);
 
   uint8_t hwStatus = LAN.hardwareStatus();
   Serial.printf("HW Status: %d\n", hwStatus);
   
-  Serial.println("Waiting for Ethernet..."); // Wait for link to be established
+  Serial.println("Waiting for Ethernet..."); 
   uint32_t startTime = millis();
   while (LAN.linkStatus() != LinkON && millis() - startTime < 10000) {
     delay(100);
     Serial.print(".");
   }
   int linkStat = LAN.linkStatus();
-  Serial.printf("Link status: %d\n", linkStat); // LinkOFF = 0, LinkON = 1, Unknown = 2
+  Serial.printf("Link status: %d\n", linkStat); 
   
 
   if (LAN.linkStatus() == 1) {
@@ -502,12 +462,9 @@ void setupLAN() {
   M5.Display.println();
   M5.Display.print("IP = ");
   M5.Display.println(LAN.localIP());
-  // Wire.begin(G2, G1);
 }
 
 
-
-// MOTOR FUNCTIONS
 bool connectToMotor(){
   if (motorConnected) return true;
 
@@ -561,10 +518,8 @@ bool modbusReadHoldingRegisters(uint16_t startAddress, uint16_t numRegisters, ui
     return false;
   }
 
-
   uint8_t request[12];
   transactionID++;
-
 
   //Modbus Apllication Protocal
   request[0] = (transactionID >> 8) & 0xFF; // Transaction ID high byte
@@ -644,71 +599,70 @@ bool modbusWriteMultipleRegisters(uint16_t startAddress, uint16_t numRegisters, 
     return false;
   }
 
+  // Calculate PDU length: 1 (func) + 2 (addr) + 2 (count) + 1 (byte count) + data bytes
+  uint8_t byteCount = numRegisters * 2;  // MBAP header (7) + PDU (6 + data)
+  uint16_t pduLength = 7 + byteCount;
 
-// Calculate PDU length: 1 (func) + 2 (addr) + 2 (count) + 1 (byte count) + data bytes
-uint8_t byteCount = numRegisters * 2;  // MBAP header (7) + PDU (6 + data)
-uint16_t pduLength = 7 + byteCount;
+  // Build request packet
+  uint8_t request[13 + byteCount];
+  transactionID++;
 
-// Build request packet
-uint8_t request[13 + byteCount];
-transactionID++;
+  // MBAP Header
+  request[0] = (transactionID >> 8) & 0xFF;
+  request[1] = transactionID & 0xFF;
+  request[2] = 0x00;                         // Protocol ID high
+  request[3] = 0x00;                         // Protocol ID low
+  request[4] = (pduLength >> 8) & 0xFF;      // Length high
+  request[5] = pduLength & 0xFF;             // Length low
+  request[6] = MOTOR_SLAVE_ID;                     // Unit ID
 
-// MBAP Header
-request[0] = (transactionID >> 8) & 0xFF;
-request[1] = transactionID & 0xFF;
-request[2] = 0x00;                         // Protocol ID high
-request[3] = 0x00;                         // Protocol ID low
-request[4] = (pduLength >> 8) & 0xFF;      // Length high
-request[5] = pduLength & 0xFF;             // Length low
-request[6] = MOTOR_SLAVE_ID;                     // Unit ID
+  // PDU - Function Code 0x10 (Write Multiple Registers)
+  request[7] = 0x10;                         // Function code
+  request[8] = (startAddress >> 8) & 0xFF;   // Start address high
+  request[9] = startAddress & 0xFF;          // Start address low
+  request[10] = (numRegisters >> 8) & 0xFF;  // Number of registers high
+  request[11] = numRegisters & 0xFF;         // Number of registers low
+  request[12] = byteCount;                   // Byte count
 
-// PDU - Function Code 0x10 (Write Multiple Registers)
-request[7] = 0x10;                         // Function code
-request[8] = (startAddress >> 8) & 0xFF;   // Start address high
-request[9] = startAddress & 0xFF;          // Start address low
-request[10] = (numRegisters >> 8) & 0xFF;  // Number of registers high
-request[11] = numRegisters & 0xFF;         // Number of registers low
-request[12] = byteCount;                   // Byte count
+  // Data
+  for (int i = 0; i < numRegisters; i++) {
+    request[13 + i * 2] = (data[i] >> 8) & 0xFF;  // High byte
+    request[13 + i * 2 + 1] = data[i] & 0xFF;     // Low byte
+  }
 
-// Data
-for (int i = 0; i < numRegisters; i++) {
-  request[13 + i * 2] = (data[i] >> 8) & 0xFF;  // High byte
-  request[13 + i * 2 + 1] = data[i] & 0xFF;     // Low byte
-}
+  // Send request
+  Serial.printf("→ Writing %d registers to 0x%04X\n", numRegisters, startAddress);
+  modbusClient.write(request, 13 + byteCount);
+  modbusClient.flush();
 
-// Send request
-Serial.printf("→ Writing %d registers to 0x%04X\n", numRegisters, startAddress);
-modbusClient.write(request, 13 + byteCount);
-modbusClient.flush();
+  // Wait for response (12 bytes for write multiple)
+  uint32_t startTime = millis();
+  while (modbusClient.available() < 12 && millis() - startTime < 1000) {
+    delay(1);
+  }
 
-// Wait for response (12 bytes for write multiple)
-uint32_t startTime = millis();
-while (modbusClient.available() < 12 && millis() - startTime < 1000) {
-  delay(1);
-}
+  if (modbusClient.available() < 12) {
+    Serial.println("✗ Modbus timeout!");
+    return false;
+  }
 
-if (modbusClient.available() < 12) {
-  Serial.println("✗ Modbus timeout!");
-  return false;
-}
+  // Read response
+  uint8_t response[12];
+  modbusClient.readBytes(response, 12);
 
-// Read response
-uint8_t response[12];
-modbusClient.readBytes(response, 12);
+  // Check for errors
+  if (response[7] & 0x80) {
+    Serial.printf("✗ Modbus error: 0x%02X\n", response[8]);
+    return false;
+  }
 
-// Check for errors
-if (response[7] & 0x80) {
-  Serial.printf("✗ Modbus error: 0x%02X\n", response[8]);
-  return false;
-}
+  if (response[7] != 0x10) {
+    Serial.printf("✗ Wrong function code: 0x%02X\n", response[7]);
+    return false;
+  }
 
-if (response[7] != 0x10) {
-  Serial.printf("✗ Wrong function code: 0x%02X\n", response[7]);
-  return false;
-}
-
-Serial.println("✓ Write successful!");
-return true;
+  Serial.println("✓ Write successful!");
+  return true;
 
 }
 
@@ -826,10 +780,6 @@ void clearAlarms(){
     modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, resetCmd);
   }
 }
-// MOTOR FUNCTIONS
-
-
-
 
 void loop() {
   static uint32_t lastLoopTime = 0;
@@ -846,6 +796,12 @@ void loop() {
     {
       if(checkAlarmsStatus()){
         clearAlarms();
+
+        Serial.println("Sending SERVO ON after reconnect...");
+        uint16_t servoOn[1] = {0x0001};
+        modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, servoOn);
+        delay(200);  
+
         performHoming();
       }
 
@@ -856,12 +812,7 @@ void loop() {
     readMotorPosition();
     }
 
-
-
-  yield(); // let system handble background task
-
- 
-
+    yield(); // let system handble background task
 
   delay(1000/60);
   
