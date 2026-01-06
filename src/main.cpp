@@ -6,6 +6,9 @@
 #include <esp_task_wdt.h>  // watchdog for unrebooting
 #include <math.h>
 #include "angle8_control.h" 
+#include <OSCMessage.h>  // OSC library
+#include <OSCBundle.h>   // OSC library 
+#include <WiFi.h> // WIFI OSC test
 
 // ===============   DMX CONFIG   ===============
 #define DMX_TX_PIN GPIO_NUM_7 /// GPIO_NUM_7
@@ -48,16 +51,34 @@ EthernetClient modbusClient;
 // ===============  M5 IP CONFIG   ===============
 
 
+
+// ===============  OSC CONFIG   ===============
+//EthernetUDP oscUDP;
+WiFiUDP oscUDP;
+const unsigned int oscLocalPort = 8000;
+// ===============  OSC CONFIG   ===============
+
+
+// ===============  WIFI CONFIG  ===============
+const char* ssid = "SDH_G";       // Your WiFi network name
+const char* password = "splinedesignhub";    // Your WiFi password
+// ===============  WIFI CONFIG  ===============
+
+
+
 // ===============  ORIENTAL MOTOR ===============
 bool motorConnected = false;
 uint16_t transactionID = 0;
 bool justReconnected = false;
+// ===============  ORIENTAL MOTOR ===============
+
+
 
 
 // ===============  MOTOR SPEED  ===============
-int32_t oriental_motorSpeed = -50; //swap direction +50 or -50
-float oriental_motorStartAcc = 0.2; //
-float oriental_motorStopAcc = 0.2; //
+int32_t oriental_motorSpeed = 500; //swap direction +50 or -50
+float oriental_motorStartAcc = 0.01; // bigger number, slowly 
+float oriental_motorStopAcc = 100; //
 // ===============  MOTOR SPEED  ===============
 
 
@@ -82,13 +103,34 @@ void startContinuousSpeedControl(int32_t speed, float startAcc, float stopAcc);
 void performHoming();
 bool checkAlarmsStatus();
 void clearAlarms();
+void stopMotor();
 
+void setupWiFi();
+void setupOSC();
+void receiveOSC();
 
 bool modbusReadHoldingRegisters(uint16_t startAddress, 
 uint16_t numRegisters, uint16_t* data);
 bool modbusWriteMultipleRegisters(uint16_t startAddress,
 uint16_t numRegisters, uint16_t* data);
 // =============== FUNCTION DEFINE ===============
+
+
+// =============== FLAG_OSC PLACEHOLDER ===============
+// Command_1 START: TD OSC_OUT, Start flag, wireless osc?
+// Command_2 STOP: M5_LS_Flag // limit Switchflag send STOP command and set position as 0.
+// OSC OUTPUT: TD OSC_IN, POS float from 0.0 to 1.0, wireless osc?
+// TODO: move the motor.
+// TODO: measure the one sequence step, for now use a placeholder number. Record, several times of LS flag and the it's motor steps value.
+// TODO: control 6 motors for the same, chain, wiring.
+
+// const float CURRENT_RAIL_POS = 0.0;
+// const int COMMAND_RAIL_START = 0;
+
+// const int LS_FLAG = 0;
+// const int COMMAND_RAIL_STOP = 0;
+// uint16_t RAIL_POS_RANGE = 0.0; // Something very big.
+// =============== FLAG_OSC PLACEHOLDER ===============
 
 
 void setup() {
@@ -123,9 +165,10 @@ void setup() {
   //M5 IP GOOD, DMX BAD, but DMX auto move without 8 angle
   init8Angle(); 
   Wire.begin(G2, G1, 400000); 
+  setupWiFi();
   setupLAN();
+  setupOSC();
 
-  
   delay(1000);
   connectToMotor();
 
@@ -152,12 +195,12 @@ void setup() {
       Serial.printf("  Servo ON: %s\n", (statusData[0] &    0x01) ? "YES" : "NO");
     }
 
-    performHoming();
+    // performHoming();
     
     Serial.println("\n🎪 INSTALLATION MODE");
     Serial.println("Starting continuous rotation...\n");
 
-    startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
+    //startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
   }
 }
 
@@ -464,6 +507,73 @@ void setupLAN() {
   M5.Display.println(LAN.localIP());
 }
 
+void setupWiFi() {
+  Serial.println("\n=== WiFi Setup ===");
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println("==================\n");
+}
+
+
+void setupOSC(){
+  Serial.println("\n=== OSC SETUP ===");
+  oscUDP.begin(oscLocalPort);
+  Serial.printf("OSC initialized, listening on port: %d\n", oscLocalPort);  // ← Add this
+  Serial.printf("Listening IP: %s\n", WiFi.localIP().toString().c_str());
+  // Begin UDP listening on oscLocalPort
+  // Print to Serial that OSC is initialized and listening on the port
+}
+
+void receiveOSC(){
+  int packetSize = oscUDP.parsePacket();
+
+  if (packetSize > 0){
+    Serial.println(">>> OSC PACKET RECEIVED <<<");
+
+    char buffer[256];
+    int len = oscUDP.read(buffer, 256);
+
+    OSCBundle bundle;
+    bundle.fill((uint8_t*)buffer, len);
+
+    if (!bundle.hasError()) {
+      // Process each message in the bundle
+      for (int i = 0; i < bundle.size(); i++) {
+        OSCMessage *msg = bundle.getOSCMessage(i);
+
+        char addressBuffer[64];
+        msg->getAddress(addressBuffer, 0);
+
+        // Check if it's the /Start message
+        if (strcmp(addressBuffer, "/Start") == 0 && msg->size() > 0) {
+          float value = msg->getFloat(0);
+
+          Serial.print("OSC /Start received | Value: ");
+          Serial.println(value);
+
+          if (value == 1.0) {
+            Serial.println(">>> STARTING MOTOR <<<");
+            startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
+          }
+          else if (value == 0.0) {
+            Serial.println(">>> STOPPING MOTOR <<<");
+            stopMotor();
+          }
+        }
+      }
+    }
+  }
+}
+
 
 bool connectToMotor(){
   if (motorConnected) return true;
@@ -733,16 +843,17 @@ void startContinuousSpeedControl(int32_t speed, float startAcc, float stopAcc) {
 void stopMotor() {
   Serial.println("🛑 Stopping motor (deceleration)...");
 
-  uint16_t stopCmd[1] = {1 << 5};  // Bit 5 = STOP
+  // uint16_t stopCmd[1] = {1 << 5};  // Bit 5 = STOP
 
-  if (modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, stopCmd)) {
-    Serial.println("✓ Stop command sent");
+  // if (modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, stopCmd)) {
+  //   Serial.println("✓ Stop command sent");
 
-    M5.Display.setCursor(0, 210);
-    M5.Display.setTextColor(RED);
-    M5.Display.println("STOPPED!");
-    M5.Display.setTextColor(WHITE);
-  }
+  //   M5.Display.setCursor(0, 210);
+  //   M5.Display.setTextColor(RED);
+  //   M5.Display.println("STOPPED!");
+  //   M5.Display.setTextColor(WHITE);
+  // }
+  startContinuousSpeedControl(0, oriental_motorStartAcc, oriental_motorStopAcc);
 }
 
 void performHoming(){
@@ -789,7 +900,7 @@ void loop() {
   M5.update();
   read8AngleInputs();
   updateDMX();
-
+  receiveOSC();
 
   if(checkMotorConnection()){
     if(justReconnected)
@@ -802,7 +913,7 @@ void loop() {
         modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, servoOn);
         delay(200);  
 
-        performHoming();
+        // performHoming();
       }
 
     startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
