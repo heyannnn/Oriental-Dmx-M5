@@ -9,6 +9,7 @@
 #include <OSCMessage.h>  // OSC library
 #include <OSCBundle.h>   // OSC library 
 #include <WiFi.h> // WIFI OSC test
+#include <Preferences.h>
 
 // ===============   DMX CONFIG   ===============
 #define DMX_TX_PIN GPIO_NUM_7 /// GPIO_NUM_7
@@ -64,6 +65,10 @@ const char* ssid = "SDH_G";       // Your WiFi network name
 const char* password = "splinedesignhub";    // Your WiFi password
 // ===============  WIFI CONFIG  ===============
 
+// // ===============  WIFI CONFIG  ===============
+// const char* ssid = "Yan hehehe🫸";       // Your WiFi network name
+// const char* password = "yanheheisgood";    // Your WiFi password
+// // ===============  WIFI CONFIG  ===============
 
 
 // ===============  ORIENTAL MOTOR ===============
@@ -80,6 +85,21 @@ int32_t oriental_motorSpeed = 500; //swap direction +50 or -50
 float oriental_motorStartAcc = 0.01; // bigger number, slowly 
 float oriental_motorStopAcc = 100; //
 // ===============  MOTOR SPEED  ===============
+
+
+
+// ===============  LIMIT SWITCH ===============
+#define LIMIT_SWITCH_PIN GPIO_NUM_5
+// ===============  LIMIT SWITCH ===============
+
+// ===============  CALIBRATION DATA ===============
+bool isCalibrated = false;
+int32_t homePosition = 0;
+int32_t limitPosition = 0;
+int32_t oneSequenceSteps = 0;
+
+Preferences preferences;
+// ===============  CALIBRATION DATA ===============
 
 
 
@@ -108,6 +128,13 @@ void stopMotor();
 void setupWiFi();
 void setupOSC();
 void receiveOSC();
+
+void setupLimitSwitch();
+bool isLimitSwitchTriggered();
+
+void autoCalibrate();
+void saveCalibration();
+bool loadCalibration();
 
 bool modbusReadHoldingRegisters(uint16_t startAddress, 
 uint16_t numRegisters, uint16_t* data);
@@ -156,7 +183,7 @@ void setup() {
   delay(1000);
   
   setupDMX();
-
+  setupLimitSwitch();
 
   //DMX GOOD, M5 IP BAD
   // setupLAN();
@@ -195,12 +222,20 @@ void setup() {
       Serial.printf("  Servo ON: %s\n", (statusData[0] &    0x01) ? "YES" : "NO");
     }
 
-    // performHoming();
+    performHoming();
     
     Serial.println("\n🎪 INSTALLATION MODE");
     Serial.println("Starting continuous rotation...\n");
 
     //startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
+   
+    if (!loadCalibration()) {
+    // No calibration found - run auto-calibration
+    Serial.println("Running first-time calibration...");
+    autoCalibrate();
+    } else {
+    Serial.println("Using saved calibration - skipping auto-calibration");
+    }
   }
 }
 
@@ -569,6 +604,19 @@ void receiveOSC(){
             stopMotor();
           }
         }
+
+        // Check for /Calibrate command
+        if (strcmp(addressBuffer, "/Calibrate") == 0 && msg->size() > 0) {
+          float value = msg->getFloat(0);
+
+          Serial.print("OSC /Calibrate received | Value: ");
+          Serial.println(value);
+
+          if (value == 1.0) {
+            Serial.println(">>> STARTING CALIBRATION <<<");
+            autoCalibrate();
+          }
+        }
       }
     }
   }
@@ -785,7 +833,7 @@ void readMotorPosition() {
 
     if (modbusReadHoldingRegisters(ADDR_POS, 2, posData)){
       // Combine two 16-bit registers into one 32-bit position
-      int32_t position = ((int32_t)posData[0] << 16) | posData[1];
+      int32_t position = ((int32_t)posData[1] << 16) | posData[0];
       // M5 Display
       M5.Display.fillRect(0, 220, 320, 20, BLACK);
       M5.Display.setCursor(0, 220);
@@ -869,6 +917,102 @@ void performHoming(){
   }
 }
 
+void setupLimitSwitch() {
+  pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);
+  Serial.println("Limit switch initialized on GPIO 5");
+}
+
+
+bool isLimitSwitchTriggered() {
+  // return digitalRead(LIMIT_SWITCH_PIN) == LOW;
+
+  // PLACEHOLDER: Fake trigger every 10 seconds
+  static uint32_t lastTriggerTime = 0;
+  uint32_t currentTime = millis();
+
+  if (currentTime - lastTriggerTime >= 10000) {  // 10 seconds
+    lastTriggerTime = currentTime;
+    Serial.println(">>> FAKE LIMIT SWITCH TRIGGERED! <<<");
+    return true;
+  }
+  return false;
+}
+
+float getNormalizedPosition() {
+  if (!isCalibrated || oneSequenceSteps == 0) {
+    return 0.0;  // Not calibrated yet
+  }
+
+  uint16_t posData[2];
+  if (modbusReadHoldingRegisters(ADDR_POS, 2, posData)) {
+    int32_t currentPos = ((int32_t)posData[1] << 16) | posData[0];
+
+    // Map position from [homePosition...limitPosition] to [0.0...1.0]
+    float normalized = (float)(currentPos - homePosition) / (float)oneSequenceSteps;
+
+    // Clamp to 0.0-1.0 range
+    if (normalized < 0.0) normalized = 0.0;
+    if (normalized > 1.0) normalized = 1.0;
+
+    return normalized;
+  }
+  return 0.0;
+}
+
+void autoCalibrate() {
+    Serial.println("\n=== AUTO CALIBRATION START ===");
+
+    // 1. Set current position as home (0)
+    performHoming();
+    delay(500);
+    homePosition = 0;
+    Serial.println("Home position set to 0");
+
+    // 2. Start moving toward limit switch
+    Serial.println("Moving toward limit switch...");
+    startContinuousSpeedControl(oriental_motorSpeed,oriental_motorStartAcc, oriental_motorStopAcc);
+
+    // 3. Wait for limit switch trigger
+    while (!isLimitSwitchTriggered()) {
+      delay(50);
+      yield();
+    }
+
+    // 4. Stop motor
+    Serial.println("Limit switch detected! Stopping motor...");
+    stopMotor();
+    delay(1000);  // Wait for motor to fully stop
+
+    // 5. Read final position
+    uint16_t posData[2];
+    if (modbusReadHoldingRegisters(ADDR_POS, 2, posData)) {
+      limitPosition = ((int32_t)posData[1] << 16) | posData[0];
+      oneSequenceSteps = abs(limitPosition - homePosition);
+      isCalibrated = true;
+
+      Serial.println("=== CALIBRATION COMPLETE ===");
+      Serial.printf("  Home Position: %d steps\n", homePosition);
+      Serial.printf("  Limit Position: %d steps\n", limitPosition);
+      Serial.printf("  One Sequence: %d steps\n", oneSequenceSteps);
+      Serial.println("============================\n");
+      saveCalibration();
+    } else {
+      Serial.println("ERROR: Failed to read position!");
+    }
+}
+
+
+void saveCalibration() {
+  preferences.begin("motor", false);  // namespace "motor", read-write mode
+  preferences.putInt("homePos", homePosition);
+  preferences.putInt("limitPos", limitPosition);
+  preferences.putInt("oneSeqSteps", oneSequenceSteps);
+  preferences.putBool("calibrated", true);
+  preferences.end();
+
+  Serial.println("✓ Calibration saved to flash memory");
+}
+
 bool checkAlarmsStatus()
 {
   uint16_t alarmStatus[1];
@@ -880,6 +1024,29 @@ bool checkAlarmsStatus()
   }
   return false;
 }
+
+bool loadCalibration() {
+  preferences.begin("motor", true);  // namespace "motor", read-only mode
+
+  isCalibrated = preferences.getBool("calibrated", false);
+
+  if (isCalibrated) {
+    homePosition = preferences.getInt("homePos", 0);
+    limitPosition = preferences.getInt("limitPos", 0);
+    oneSequenceSteps = preferences.getInt("oneSeqSteps", 0);
+    preferences.end();
+
+    Serial.println("✓ Calibration loaded from memory:");
+    Serial.printf("  Home: %d, Limit: %d, Steps: %d\n",
+                  homePosition, limitPosition, oneSequenceSteps);
+    return true;
+  }
+
+  preferences.end();
+  Serial.println("⚠ No calibration found in memory");
+  return false;
+}
+
 
 void clearAlarms(){
   uint16_t clearCmd[1] = {1 << 7};
@@ -913,7 +1080,7 @@ void loop() {
         modbusWriteMultipleRegisters(ADDR_STATIC_IO_IN, 1, servoOn);
         delay(200);  
 
-        // performHoming();
+        performHoming();
       }
 
     startContinuousSpeedControl(oriental_motorSpeed, oriental_motorStartAcc, oriental_motorStopAcc);
@@ -921,7 +1088,20 @@ void loop() {
     justReconnected = false;
     }
     readMotorPosition();
-    }
+
+
+
+    static uint32_t lastPrint = 0;
+    if (millis() - lastPrint > 500) {
+      lastPrint = millis();
+      if (isCalibrated) {
+        float normalizedPos = getNormalizedPosition();
+        Serial.printf("Normalized Position: %.3f (%.1f%%)\n", normalizedPos, normalizedPos * 100.0);
+      } else {
+        Serial.println("Not calibrated yet");
+      }
+
+  }
 
     yield(); // let system handble background task
 
